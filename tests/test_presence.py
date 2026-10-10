@@ -19,6 +19,9 @@ class PresenceTests(AppCase):
         self.assertIn('not checked', app.presence.get())
         self.assertFalse(app.marks)
 
+    def test_present_label_text(self):
+        self.assertEqual(rs.PRESENT_LABEL, 'Already on remote')
+
     def test_present_and_absent_by_exact_case_sensitive_full_name(self):
         self.touch('roms_md', 'a.bin', 'B.bin', 'c.bin', 'd.md')
         app = self.make_app('emulator.active=megadrive\n')
