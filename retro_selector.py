@@ -270,7 +270,7 @@ def emulator_placeholder(emulator):
     return _placeholders[emulator].copy()
 
 
-PRESENT_LABEL = 'Ya en remoto'
+PRESENT_LABEL = 'Already on remote'
 SPACE_NOT_LOADED = 'Disk space: not loaded'
 SPACE_LOADING = 'Disk space: loading...'
 DF_LINE = re.compile(r'(\d+)\s+(\d+)\s+(\d+)\s+\d+%\s+/')
