@@ -912,12 +912,42 @@ class TerminalWindow:
             self.window.destroy()
 
 
+def get_usable_screen_area(root):
+    """Return (width, height) of usable desktop area, accounting for taskbars/decorations when available."""
+    screen_w = root.winfo_screenwidth()
+    screen_h = root.winfo_screenheight()
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            rect = wintypes.RECT()
+            # 48 = SPI_GETWORKAREA
+            if ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0):
+                w = rect.right - rect.left
+                h = rect.bottom - rect.top
+                if w > 0 and h > 0:
+                    return w, h
+        except Exception:
+            pass
+    try:
+        max_w, max_h = root.maxsize()
+        if 0 < max_w < screen_w and 0 < max_h < screen_h:
+            return max_w, max_h
+    except Exception:
+        pass
+    return max(320, screen_w - 16), max(240, screen_h - 60)
+
+
 class App:
     def __init__(self, root):
         self.root = root
         root.title('Retro Selector - MAME / SNES / Mega Drive - SSH / SCP')
-        root.geometry('1450x950')
-        root.minsize(1100, 760)
+        usable_w, usable_h = get_usable_screen_area(root)
+        target_w = min(1450, usable_w)
+        target_h = min(950, usable_h)
+        root.geometry(f'{target_w}x{target_h}')
+        root.minsize(640, 400)
+        self.current_cols = 4
         found = {}
         try:
             if CONFIG.exists():
@@ -1033,23 +1063,49 @@ class App:
         menu = tk.Menu(self.root)
         menu.add_command(label='About / License', command=self.about)
         self.root.configure(menu=menu)
-        config = ttk.LabelFrame(self.root, text='Configuration', padding=10)
-        config.pack(fill='x', padx=10, pady=10)
-        config.columnconfigure(0, weight=1, uniform='columns')
-        config.columnconfigure(1, weight=1, uniform='columns')
-        left, right = ttk.LabelFrame(config, text='SSH connection (shared)', padding=6), \
-            ttk.LabelFrame(config, text='Emulator profile', padding=6)
-        left.grid(row=0, column=0, sticky='nsew', padx=(0, 5))
-        right.grid(row=0, column=1, sticky='nsew', padx=(5, 0))
-        for column in (left, right):
-            column.columnconfigure(1, weight=1)
+
+        self.outer_canvas = tk.Canvas(self.root, highlightthickness=0)
+        self.outer_vscroll = ttk.Scrollbar(self.root, orient='vertical', command=self.outer_canvas.yview)
+        self.outer_hscroll = ttk.Scrollbar(self.root, orient='horizontal', command=self.outer_canvas.xview)
+        self.outer_canvas.configure(xscrollcommand=self.outer_hscroll.set, yscrollcommand=self.outer_vscroll.set)
+
+        self.outer_canvas.grid(row=0, column=0, sticky='nsew')
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+
+        self.main_frame = ttk.Frame(self.outer_canvas)
+        self.main_window = self.outer_canvas.create_window((0, 0), window=self.main_frame, anchor='nw')
+
+        self.main_frame.bind('<Configure>', self.on_main_configure)
+        self.outer_canvas.bind('<Configure>', self.on_outer_canvas_configure)
+        self.root.bind('<MouseWheel>', self.outer_wheel)
+        self.root.bind('<Button-4>', self.outer_wheel)
+        self.root.bind('<Button-5>', self.outer_wheel)
+
+        config = ttk.LabelFrame(self.main_frame, text='Configuration', padding=(6, 4))
+        config.pack(fill='x', padx=6, pady=(4, 4))
+        config.columnconfigure(0, weight=1)
+        config.columnconfigure(1, weight=1)
+        left, right = ttk.LabelFrame(config, text='SSH connection (shared)', padding=(6, 4)), \
+            ttk.LabelFrame(config, text='Emulator profile', padding=(6, 4))
+        left.grid(row=0, column=0, sticky='nsew', padx=(0, 4))
+        right.grid(row=0, column=1, sticky='nsew', padx=(4, 0))
+        left.columnconfigure(1, weight=1)
+        left.columnconfigure(3, weight=1)
+        right.columnconfigure(1, weight=1)
         self.entries = {}
         self.profile_rows = {('mame', None): [], ('mame', 'roms'): [], ('mame', 'samples'): [], ('snes', None): [], ('megadrive', None): []}
-        left_fields = [('SSH host / IP:', 'ssh.host'), ('SSH port:', 'ssh.port'), ('User:', 'ssh.username'),
-                       ('Authentication:', 'ssh.auth_mode'), ('Password:', 'ssh.password'),
-                       ('Private key:', 'ssh.private_key'), ('Key passphrase:', 'ssh.key_passphrase'),
-                       ('Remote listing:', 'ssh.remote_listing_mode'),
-                       ('Terminal scrollback lines:', SCROLLBACK_KEY)]
+        left_fields = [
+            ('SSH host / IP:', 'ssh.host', 0, 0),
+            ('SSH port:', 'ssh.port', 0, 2),
+            ('User:', 'ssh.username', 1, 0),
+            ('Authentication:', 'ssh.auth_mode', 1, 2),
+            ('Password:', 'ssh.password', 2, 0),
+            ('Key passphrase:', 'ssh.key_passphrase', 2, 2),
+            ('Private key:', 'ssh.private_key', 3, 0),
+            ('Remote listing:', 'ssh.remote_listing_mode', 4, 0),
+            ('Terminal scrollback lines:', SCROLLBACK_KEY, 4, 2),
+        ]
         # (label, key, (emulator, MAME content) it is shown for; None = always visible; rows 2-3 are shared)
         right_fields = [('Emulator:', 'emulator.active', None, 0),
                         ('MAME content:', 'content.mode', ('mame', None), 1),
@@ -1063,17 +1119,36 @@ class App:
                         ('Remote Mega Drive ROMs:', 'megadrive.remote_dir', ('megadrive', None), 3)]
         browse_keys = ('rom.source', 'samples.source', 'snes.rom.source', 'megadrive.rom.source')
 
-        def field(parent, row, label, key):
+        def field_left(parent, row, col, label, key):
             name = ttk.Label(parent, text=label)
-            name.grid(row=row, column=0, sticky='w', padx=8, pady=2)
+            name.grid(row=row, column=col, sticky='w', padx=(4, 2), pady=1)
             if key in ENUM_KEYS:
-                widget = ttk.Combobox(parent, textvariable=self.v[key], values=ENUM_KEYS[key], state='readonly')
+                widget = ttk.Combobox(parent, textvariable=self.v[key], values=ENUM_KEYS[key], state='readonly',
+                                      width=12 if key == 'ssh.auth_mode' else 14)
                 self.combos.append(widget)
                 if key == 'ssh.auth_mode':
                     widget.bind('<<ComboboxSelected>>', lambda event: self.auth_state())
             else:
-                widget = ttk.Entry(parent, textvariable=self.v[key],
+                width = 6 if key in ('ssh.port', SCROLLBACK_KEY) else 16
+                widget = ttk.Entry(parent, textvariable=self.v[key], width=width,
                                    show='*' if key in ('ssh.password', 'ssh.key_passphrase') else '')
+                self.settings.append(widget)
+            widget.grid(row=row, column=col + 1, sticky='ew', padx=(2, 4), pady=1)
+            self.entries[key] = widget
+            if key == 'ssh.private_key':
+                self.key_browse = ttk.Button(parent, text='Browse...', command=self.browse_key)
+                self.key_browse.grid(row=row, column=col + 2, padx=(2, 4), pady=1, sticky='w')
+                self.settings.append(self.key_browse)
+            return [name, widget]
+
+        def field_right(parent, row, label, key):
+            name = ttk.Label(parent, text=label)
+            name.grid(row=row, column=0, sticky='w', padx=6, pady=2)
+            if key in ENUM_KEYS:
+                widget = ttk.Combobox(parent, textvariable=self.v[key], values=ENUM_KEYS[key], state='readonly')
+                self.combos.append(widget)
+            else:
+                widget = ttk.Entry(parent, textvariable=self.v[key])
                 self.settings.append(widget)
             widget.grid(row=row, column=1, sticky='ew', pady=2)
             self.entries[key] = widget
@@ -1081,109 +1156,188 @@ class App:
             if key in browse_keys:
                 widget.bind('<Return>', lambda event: self.load())
                 button = ttk.Button(parent, text='Browse...', command=lambda k=key: self.browse_source(k))
-                button.grid(row=row, column=2, padx=8)
+                button.grid(row=row, column=2, padx=6)
                 self.settings.append(button)
                 buttons.append(button)
-            elif key == 'ssh.private_key':
-                self.key_browse = ttk.Button(parent, text='Browse...', command=self.browse_key)
-                self.key_browse.grid(row=row, column=2, padx=8)
-                self.settings.append(self.key_browse)
             return [name, widget] + buttons
 
-        for row, (label, key) in enumerate(left_fields):
-            field(left, row, label, key)
+        for label, key, row, col in left_fields:
+            field_left(left, row, col, label, key)
         for label, key, profile, row in right_fields:
-            parts = field(right, row, label, key)
+            parts = field_right(right, row, label, key)
             if profile:
                 self.profile_rows[profile].extend(parts)
             if key in ('content.mode', 'samples.source', 'samples.remote_dir'):
                 self.sample_widgets.append(self.entries[key])
             if key == 'samples.source':
                 self.sample_widgets.append(parts[2])
-        row = len(left_fields)
-        for key, label in [('ssh.legacy_rsa', 'Allow legacy SSH RSA (SHA-1)'),
-                           ('ssh.save_credentials', 'Save credentials in .properties (plain text)')]:
-            check = ttk.Checkbutton(left, text=label, variable=self.v[key], onvalue='true', offvalue='false')
-            check.grid(row=row, column=1, columnspan=2, sticky='w')
-            self.settings.append(check)
-            row += 1
+
+        check1 = ttk.Checkbutton(left, text='Allow legacy SSH RSA (SHA-1)', variable=self.v['ssh.legacy_rsa'],
+                                 onvalue='true', offvalue='false')
+        check1.grid(row=5, column=0, columnspan=2, sticky='w', padx=4, pady=1)
+        self.settings.append(check1)
+        check2 = ttk.Checkbutton(left, text='Save credentials in .properties (plain text)',
+                                 variable=self.v['ssh.save_credentials'], onvalue='true', offvalue='false')
+        check2.grid(row=5, column=2, columnspan=2, sticky='w', padx=4, pady=1)
+        self.settings.append(check2)
+
         actions = ttk.Frame(config)
-        actions.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(8, 0))
+        actions.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(4, 0))
         for text, command in (('Load', self.load), ('Save', self.save)):
             button = ttk.Button(actions, text=text, command=command)
-            button.pack(side='left', padx=8)
+            button.pack(side='left', padx=4)
             self.settings.append(button)
         self.terminal_button = ttk.Button(actions, text='>_ SSH terminal', command=self.open_terminal)
-        self.terminal_button.pack(side='left', padx=8)
-        ttk.Label(actions, text='ssh: POSIX shell / sftp: SFTP subsystem').pack(side='left', padx=8)
-        split = ttk.Panedwindow(self.root, orient='horizontal')
-        split.pack(fill='both', expand=True, padx=10)
+        self.terminal_button.pack(side='left', padx=4)
+        ttk.Label(actions, text='ssh: POSIX shell / sftp: SFTP subsystem').pack(side='left', padx=4)
+
+        split = ttk.Panedwindow(self.main_frame, orient='horizontal')
+        split.pack(fill='both', expand=True, padx=6)
         left, right = ttk.LabelFrame(split), ttk.LabelFrame(split)
         self.local_panel, self.remote_panel = left, right
         split.add(left, weight=3)
         split.add(right, weight=2)
         for panel, variable in ((left, self.search), (right, self.remote_search)):
-            tools = ttk.Frame(panel, padding=8)
+            tools = ttk.Frame(panel, padding=(6, 4))
             tools.pack(fill='x')
             ttk.Label(tools, text='Search:').pack(side='left')
-            ttk.Entry(tools, textvariable=variable).pack(side='left', fill='x', expand=True, padx=5)
+            ttk.Entry(tools, textvariable=variable).pack(side='left', fill='x', expand=True, padx=4)
             ttk.Button(tools, text='Clear', command=lambda var=variable: var.set('')).pack(side='left')
             if panel is right:
                 self.refresh_button = ttk.Button(tools, text='Refresh', command=self.refresh)
-                self.refresh_button.pack(side='left', padx=5)
-        ttk.Label(left, textvariable=self.presence, padding=(8, 0)).pack(anchor='w')
+                self.refresh_button.pack(side='left', padx=4)
+        ttk.Label(left, textvariable=self.presence, padding=(6, 2)).pack(anchor='w')
         for panel, remote in ((left, False), (right, True)):
-            controls = ttk.Frame(panel, padding=8)
+            controls = ttk.Frame(panel, padding=(6, 4))
             controls.pack(fill='x')
             for text, command in [('Select all matches', lambda r=remote: self.select_all(r)),
                                   ('Clear marks', lambda r=remote: self.clear(r))]:
                 button = ttk.Button(controls, text=text, command=command)
-                button.pack(side='left', padx=3)
+                button.pack(side='left', padx=2)
                 self.settings.append(button)
-        ttk.Label(left, textvariable=self.count, padding=8).pack(anchor='w')
-        ttk.Label(right, textvariable=self.remote_count, padding=8).pack(anchor='w')
-        ttk.Label(right, textvariable=self.space, padding=(8, 0)).pack(anchor='w')
-        area = ttk.Frame(left)
-        area.pack(fill='both', expand=True)
-        self.canvas = tk.Canvas(area, highlightthickness=0)
-        scroll = ttk.Scrollbar(area, command=self.canvas.yview)
-        scroll.pack(side='right', fill='y')
-        self.canvas.configure(yscrollcommand=scroll.set)
-        self.canvas.pack(fill='both', expand=True)
-        self.grid = ttk.Frame(self.canvas)
-        window = self.canvas.create_window((0, 0), window=self.grid, anchor='nw')
-        self.grid.bind('<Configure>', lambda event: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.canvas.bind('<Configure>', lambda event: self.canvas.itemconfigure(window, width=event.width))
-        self.canvas.bind('<MouseWheel>', self.wheel)
-        footer = ttk.Frame(left, padding=8)
-        footer.pack(fill='x')
+        ttk.Label(left, textvariable=self.count, padding=(6, 2)).pack(anchor='w')
+        ttk.Label(right, textvariable=self.remote_count, padding=(6, 2)).pack(anchor='w')
+        ttk.Label(right, textvariable=self.space, padding=(6, 2)).pack(anchor='w')
+
+        footer = ttk.Frame(left, padding=(6, 4))
+        footer.pack(side='bottom', fill='x')
         self.prev = ttk.Button(footer, text='Previous', command=lambda: self.turn(-1))
         self.prev.pack(side='left')
-        ttk.Label(footer, textvariable=self.pages).pack(side='left', padx=8)
+        ttk.Label(footer, textvariable=self.pages).pack(side='left', padx=6)
         self.next = ttk.Button(footer, text='Next', command=lambda: self.turn(1))
         self.next.pack(side='left')
         self.copy_button = ttk.Button(footer, command=self.copy)
         self.copy_button.pack(side='right')
-        area = ttk.Frame(right, padding=8)
+
+        area = ttk.Frame(left)
         area.pack(fill='both', expand=True)
-        self.tree = ttk.Treeview(area, columns=('marked', 'name'), show='headings')
+        self.canvas = tk.Canvas(area, highlightthickness=0, height=180)
+        self.local_scroll = ttk.Scrollbar(area, command=self.canvas.yview)
+        self.local_scroll.pack(side='right', fill='y')
+        self.canvas.configure(yscrollcommand=self.local_scroll.set)
+        self.canvas.pack(fill='both', expand=True)
+        self.grid = ttk.Frame(self.canvas)
+        self.grid_window = self.canvas.create_window((0, 0), window=self.grid, anchor='nw')
+        self.grid.bind('<Configure>', lambda event: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
+        self.canvas.bind('<Configure>', self.on_canvas_configure)
+        self.canvas.bind('<MouseWheel>', self.wheel)
+        self.canvas.bind('<Button-4>', self.wheel)
+        self.canvas.bind('<Button-5>', self.wheel)
+
+        footer = ttk.Frame(right, padding=(6, 4))
+        footer.pack(side='bottom', fill='x')
+        self.delete_button = ttk.Button(footer, command=self.delete)
+        self.delete_button.pack(side='right')
+
+        area = ttk.Frame(right, padding=(6, 4))
+        area.pack(fill='both', expand=True)
+        self.tree = ttk.Treeview(area, columns=('marked', 'name'), show='headings', height=8)
         self.tree.heading('marked', text='Mark')
         self.tree.column('marked', width=55, stretch=False)
         self.tree.heading('name', text='Remote ZIP filename')
         self.tree.column('name', width=260)
-        scroll = ttk.Scrollbar(area, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        scroll.pack(side='right', fill='y')
+        self.remote_scroll = ttk.Scrollbar(area, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=self.remote_scroll.set)
+        self.remote_scroll.pack(side='right', fill='y')
         self.tree.pack(fill='both', expand=True)
         self.tree.bind('<Button-1>', self.remote_click)
         self.tree.bind('<space>', self.remote_space)
-        footer = ttk.Frame(right, padding=8)
-        footer.pack(fill='x')
-        self.delete_button = ttk.Button(footer, command=self.delete)
-        self.delete_button.pack(side='right')
-        self.progress = ttk.Progressbar(self.root, maximum=100)
-        self.progress.pack(fill='x', padx=10, pady=5)
-        ttk.Label(self.root, textvariable=self.status, padding=10).pack(anchor='w')
+
+        self.progress = ttk.Progressbar(self.main_frame, maximum=100)
+        self.progress.pack(fill='x', padx=6, pady=(4, 2))
+        ttk.Label(self.main_frame, textvariable=self.status, padding=(6, 2)).pack(anchor='w')
+
+    def on_main_configure(self, event=None):
+        self.update_outer_scroll()
+
+    def on_outer_canvas_configure(self, event=None):
+        self.update_outer_scroll()
+
+    def update_outer_scroll(self):
+        c_w = self.outer_canvas.winfo_width()
+        c_h = self.outer_canvas.winfo_height()
+        req_w = self.main_frame.winfo_reqwidth()
+        req_h = self.main_frame.winfo_reqheight()
+
+        needs_v = req_h > c_h and c_h > 1
+        needs_h = req_w > c_w and c_w > 1
+
+        if needs_v and not self.outer_vscroll.winfo_ismapped():
+            self.outer_vscroll.grid(row=0, column=1, sticky='ns')
+        elif not needs_v and self.outer_vscroll.winfo_ismapped():
+            self.outer_vscroll.grid_forget()
+
+        if needs_h and not self.outer_hscroll.winfo_ismapped():
+            self.outer_hscroll.grid(row=1, column=0, sticky='ew')
+        elif not needs_h and self.outer_hscroll.winfo_ismapped():
+            self.outer_hscroll.grid_forget()
+
+        scroll_w = max(req_w, c_w)
+        scroll_h = max(req_h, c_h)
+        self.outer_canvas.configure(scrollregion=(0, 0, scroll_w, scroll_h))
+        self.outer_canvas.itemconfigure(self.main_window, width=scroll_w, height=scroll_h)
+
+    def outer_wheel(self, event):
+        widget = getattr(event, 'widget', None)
+        while widget:
+            if widget in (self.canvas, self.tree, self.local_scroll, self.remote_scroll):
+                return
+            widget = getattr(widget, 'master', None)
+        delta = 0
+        if getattr(event, 'num', None) == 4:
+            delta = -1
+        elif getattr(event, 'num', None) == 5:
+            delta = 1
+        elif getattr(event, 'delta', 0):
+            delta = int(-event.delta / 120)
+        if delta:
+            self.outer_canvas.yview_scroll(delta, 'units')
+
+    def calculate_columns(self, width):
+        if width <= 1:
+            return 4
+        return max(1, min(12, (width - 10) // 165))
+
+    def on_canvas_configure(self, event):
+        self.canvas.itemconfigure(self.grid_window, width=event.width)
+        cols = self.calculate_columns(event.width)
+        if cols != self.current_cols:
+            self.current_cols = cols
+            self.reflow_grid()
+
+    def reflow_grid(self):
+        for column in range(12):
+            self.grid.columnconfigure(column, weight=1 if column < self.current_cols else 0)
+        visible = self.filtered[self.page * PAGE_SIZE:(self.page + 1) * PAGE_SIZE]
+        if not visible:
+            for child in self.grid.winfo_children():
+                if isinstance(child, ttk.Label):
+                    child.grid_configure(columnspan=self.current_cols)
+            return
+        for index, path in enumerate(visible):
+            if path in self.cards:
+                card = self.cards[path][0]
+                card.grid_configure(row=index // self.current_cols, column=index % self.current_cols)
 
     def auth_state(self):
         password = self.v['ssh.auth_mode'].get() == 'password'
@@ -1322,7 +1476,16 @@ class App:
         self.render()
 
     def wheel(self, event):
-        self.canvas.yview_scroll(int(-event.delta / 120), 'units')
+        delta = 0
+        if getattr(event, 'num', None) == 4:
+            delta = -1
+        elif getattr(event, 'num', None) == 5:
+            delta = 1
+        elif getattr(event, 'delta', 0):
+            delta = int(-event.delta / 120)
+        if delta:
+            self.canvas.yview_scroll(delta, 'units')
+        return 'break'
 
     def render(self):
         for widget in self.grid.winfo_children():
@@ -1334,11 +1497,13 @@ class App:
         self.pages.set(f'{self.page + 1} / {pages}')
         self.prev.configure(state='normal' if self.page else 'disabled')
         self.next.configure(state='normal' if self.page + 1 < pages else 'disabled')
-        for column in range(4):
-            self.grid.columnconfigure(column, weight=1)
+        cols = self.current_cols
+        for column in range(12):
+            self.grid.columnconfigure(column, weight=1 if column < cols else 0)
         visible = self.filtered[self.page * PAGE_SIZE:(self.page + 1) * PAGE_SIZE]
         if not visible:
-            ttk.Label(self.grid, text=f'No matching {self.noun()}.', padding=20).grid(row=0, column=0, columnspan=4)
+            ttk.Label(self.grid, text=f'No matching {self.noun()}.', padding=20).grid(
+                row=0, column=0, columnspan=cols)
         for index, path in enumerate(visible):
             try:
                 with Image.open(path.with_suffix('.png')) as source:
@@ -1355,7 +1520,7 @@ class App:
             photo = ImageTk.PhotoImage(background.convert('RGB'))
             self.images.append(photo)
             card = tk.Frame(self.grid, bd=2, relief='solid')
-            card.grid(row=index // 4, column=index % 4, padx=4, pady=4, sticky='nsew')
+            card.grid(row=index // cols, column=index % cols, padx=4, pady=4, sticky='nsew')
             variable = tk.BooleanVar(value=path in self.marks)
             check = tk.Checkbutton(card, text=self.label(path), variable=variable, wraplength=145,
                                    command=lambda item=path: self.toggle(item))
@@ -1366,6 +1531,8 @@ class App:
             button.pack(fill='both', expand=True)
             for widget in (check, badge, button):
                 widget.bind('<MouseWheel>', self.wheel)
+                widget.bind('<Button-4>', self.wheel)
+                widget.bind('<Button-5>', self.wheel)
             self.cards[path] = card, variable, check, badge, button
         self.update_marks()
         self.canvas.yview_moveto(0)
@@ -1590,7 +1757,10 @@ class App:
     def report(self, title, text, action=None):
         window = tk.Toplevel(self.root)
         window.title(title)
-        window.geometry('760x520')
+        usable_w, usable_h = get_usable_screen_area(self.root)
+        target_w = min(760, max(320, usable_w - 40))
+        target_h = min(520, max(240, usable_h - 60))
+        window.geometry(f'{target_w}x{target_h}')
         window.transient(self.root)
         area = ttk.Frame(window)
         area.pack(fill='both', expand=True)

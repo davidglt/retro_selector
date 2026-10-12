@@ -299,6 +299,26 @@ Use an expendable file and a test server first.
 
 Live vi/top behavior on the author's device has not been verified.
 
+## Small-screen layout and scrolling
+
+The graphical layout is optimized to fit small displays (such as 1280x800 and 1024x768 resolutions, netbooks, or smaller window sizes down to 640x400):
+
+- **Window sizing and bounds:** At startup, the window automatically dimensions itself to fit within the usable screen area (accounting for Windows taskbars and desktop panels via `SPI_GETWORKAREA` and display geometry), avoiding oversized initial dimensions. The minimum window size is set to `(640, 400)`.
+- **Compact configuration:** Connection fields in the SSH configuration frame are organized in a 4-column grid, reducing vertical height while preserving clarity and all settings.
+- **Persistent bottom actions:** Local and remote panel footers containing action buttons (`Copy selected`, `Delete selected`, pagination controls, progress bar, and status text) are anchored to the bottom edge of their split panels so they remain visible and are never pushed off-screen by list content.
+- **Adaptive thumbnail grid:** The local ROM thumbnail grid dynamically reflows its column count based on available canvas width (e.g., 5 columns on wide displays, 4 on standard screens, and fewer on narrower widths) without reloading thumbnails.
+- **Responsive outer scrollbars:** If the window is resized smaller than the content requires, vertical and/or horizontal scrollbars appear automatically on the outer container, ensuring every setting and control remains reachable.
+- **Inner scrolling isolation:** Inner scrolling within the local ROM thumbnail canvas, remote treeview, and SSH terminal is preserved. Mouse-wheel events inside these scrollable areas are handled locally and do not conflict with outer container scrolling.
+
+### Manual verification for small displays
+
+1. Launch `retro_selector.py` on a 1280x800 or 1024x768 display, or resize the window to these dimensions.
+2. Confirm the Configuration panel, local ROM cards, remote list, and bottom controls (`Copy selected`, `Delete selected`, pagination, progress bar, status text) are fully mapped and reachable without clipping.
+3. Resize the window horizontally: verify that the local thumbnail grid dynamically reflows its columns to match the available width.
+4. Resize the window down to smaller dimensions (e.g. 800x600 or the minimum 640x400): verify that outer scrollbars appear automatically and allow scrolling all configuration fields and bottom controls into view.
+5. Hover over the local thumbnail grid or remote ROM treeview and scroll the mouse wheel: verify that the inner list scrolls smoothly without moving the outer window scrollbar.
+6. Switch profiles between MAME, SNES, and Sega Mega Drive / Genesis: verify that field visibility updates cleanly without breaking the layout or displacing controls.
+
 ## Automated tests
 
 The suite in `tests/` uses only the standard `unittest` runner and the application's own dependencies; it never connects to a device and uses no ROMs, credentials or user data. Everything runs against a temporary directory with SSH/SCP/SFTP, dialogs and threads replaced by mocks, plus a real POSIX `sh` for the remote-listing filter.
@@ -307,6 +327,7 @@ The suite in `tests/` uses only the standard `unittest` runner and the applicati
 | --- | --- |
 | `tests/test_config.py` | Defaults, parsing, legacy `rom.source` fallback, invalid values, the example properties file, per-profile keys and extension filters (MAME, SNES, Mega Drive; saves and other systems rejected), placeholders, size/disk helpers and terminal helpers. |
 | `tests/test_app.py` | Local loading and filtering per profile, covers, profile switching (marks, search and remote state isolated, visible fields), save/load round trips and compatibility with existing configurations, validation errors, copy/delete confirmations and refusals, listing events and batch results. |
+| `tests/test_layout.py` | Small-screen layout, responsive window sizing, minsize, outer scrollbars, thumbnail grid reflow, and mouse-wheel isolation. |
 | `tests/test_transfer.py` | Remote listing (SSH shell and SFTP), copy and deletion workers, partial failures and lost connections, shell quoting, symlink/directory rejection, host key checking and authentication options. |
 
 Run from the repository root.
